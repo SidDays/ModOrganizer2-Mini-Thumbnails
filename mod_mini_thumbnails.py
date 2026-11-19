@@ -127,53 +127,115 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         self._pixmap_cache[mod_name] = None
         return None
 
+    def _get_thumbnail_target(
+        self, index: QtCore.QModelIndex
+    ) -> Optional[tuple[str, Optional[mobase.IModInterface]]]:
+        mod_name = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+        is_overwrite = mod_name.lower() == "overwrite"
+
+        # Bypass Overwrite when IGNORE_OVERWRITE is active
+        if is_overwrite and self.IGNORE_OVERWRITE:
+            return None
+
+        mod = self._organizer.modList().getMod(mod_name)
+
+        # Bypass separators and invalid/empty items
+        if not is_overwrite and (not mod or mod.isSeparator()):
+            return None
+
+        return mod_name, mod
+
     def paint(
         self,
         painter: QtGui.QPainter,
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ):
-        opt = QtWidgets.QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-
-        mod_name = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
-        is_overwrite = mod_name.lower() == "overwrite"
-
-        # Bypass Overwrite when IGNORE_OVERWRITE is active
-        if is_overwrite and self.IGNORE_OVERWRITE:
-            if self._parent_delegate:
-                self._parent_delegate.paint(painter, option, index)
-            else:
-                super().paint(painter, option, index)
-            return
-
-        mod = self._organizer.modList().getMod(mod_name)
-
-        # Bypass separators and invalid/empty items
-        if not is_overwrite and (not mod or mod.isSeparator()):
-            if self._parent_delegate:
-                self._parent_delegate.paint(painter, option, index)
-            else:
-                super().paint(painter, option, index)
-            return
-
-        pixmap = self._find_first_image(mod_name, mod)
-        if not pixmap:
-            pixmap = self._get_placeholder()
-
-        painter.save()
-        y_offset = opt.rect.top() + (opt.rect.height() - pixmap.height()) // 2
-        x_offset = opt.rect.left() + self.PADDING
-        painter.drawPixmap(x_offset, y_offset, pixmap)
-        painter.restore()
-
+        target = self._get_thumbnail_target(index)
         indent = self.THUMB_SIZE + (self.PADDING * 2)
-        opt.rect.setLeft(opt.rect.left() + indent)
+
+        if target is None or option.rect.width() < indent:
+            if self._parent_delegate:
+                self._parent_delegate.paint(painter, option, index)
+            else:
+                super().paint(painter, option, index)
+            return
+
+        mod_name, mod = target
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        opt.rect.setRight(opt.rect.right() - indent)
 
         if self._parent_delegate:
             self._parent_delegate.paint(painter, opt, index)
         else:
             super().paint(painter, opt, index)
+
+        pixmap = self._find_first_image(mod_name, mod) or self._get_placeholder()
+        painter.save()
+        x_offset = option.rect.right() - self.THUMB_SIZE - self.PADDING + 1
+        y_offset = option.rect.top() + (option.rect.height() - pixmap.height()) // 2
+        painter.drawPixmap(x_offset, y_offset, pixmap)
+        painter.restore()
+
+    def editorEvent(
+        self,
+        event: QtCore.QEvent,
+        model: QtCore.QAbstractItemModel,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> bool:
+        if self._parent_delegate:
+            return self._parent_delegate.editorEvent(event, model, option, index)
+        return super().editorEvent(event, model, option, index)
+
+    def createEditor(
+        self,
+        parent: QtWidgets.QWidget,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> Optional[QtWidgets.QWidget]:
+        if self._parent_delegate:
+            return self._parent_delegate.createEditor(parent, option, index)
+        return super().createEditor(parent, option, index)
+
+    def setEditorData(self, editor: QtWidgets.QWidget, index: QtCore.QModelIndex):
+        if self._parent_delegate:
+            self._parent_delegate.setEditorData(editor, index)
+        else:
+            super().setEditorData(editor, index)
+
+    def setModelData(
+        self,
+        editor: QtWidgets.QWidget,
+        model: QtCore.QAbstractItemModel,
+        index: QtCore.QModelIndex,
+    ):
+        if self._parent_delegate:
+            self._parent_delegate.setModelData(editor, model, index)
+        else:
+            super().setModelData(editor, model, index)
+
+    def updateEditorGeometry(
+        self,
+        editor: QtWidgets.QWidget,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ):
+        if self._parent_delegate:
+            self._parent_delegate.updateEditorGeometry(editor, option, index)
+        else:
+            super().updateEditorGeometry(editor, option, index)
+
+    def helpEvent(
+        self,
+        event: QtGui.QHelpEvent,
+        view: QtWidgets.QAbstractItemView,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> bool:
+        if self._parent_delegate:
+            return self._parent_delegate.helpEvent(event, view, option, index)
+        return super().helpEvent(event, view, option, index)
 
     def sizeHint(
         self, option: QtWidgets.QStyleOptionViewItem, index: QtCore.QModelIndex
@@ -222,7 +284,9 @@ class ModThumbnailPlugin(mobase.IPlugin):
             return
 
         self._delegate = DynamicThumbnailDelegate(
-            tree.itemDelegateForColumn(0), self._organizer, tree
+            tree.itemDelegateForColumn(0) or tree.itemDelegate(),
+            self._organizer,
+            tree,
         )
         tree.setItemDelegateForColumn(0, self._delegate)
 
