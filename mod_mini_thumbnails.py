@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import mobase
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -21,11 +21,13 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         parent_delegate: Optional[QtWidgets.QAbstractItemDelegate],
         organizer: mobase.IOrganizer,
         tree_view: QtWidgets.QTreeView,
+        is_enabled: Callable[[], bool],
     ):
         super().__init__(tree_view)
         self._parent_delegate = parent_delegate
         self._organizer = organizer
         self._tree_view = tree_view
+        self._is_enabled = is_enabled
 
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._placeholder_pixmap: Optional[QtGui.QPixmap] = None
@@ -151,6 +153,13 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ):
+        if not self._is_enabled():
+            if self._parent_delegate:
+                self._parent_delegate.paint(painter, option, index)
+            else:
+                super().paint(painter, option, index)
+            return
+
         target = self._get_thumbnail_target(index)
         indent = self.THUMB_SIZE + (self.PADDING * 2)
 
@@ -245,6 +254,9 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
             if self._parent_delegate
             else super().sizeHint(option, index)
         )
+        if not self._is_enabled():
+            return base_size
+
         min_height = self.THUMB_SIZE + (self.PADDING * 2)
         return QtCore.QSize(
             base_size.width() + self.THUMB_SIZE + (self.PADDING * 2),
@@ -278,6 +290,14 @@ class ModThumbnailPlugin(mobase.IPlugin):
     def settings(self) -> list[mobase.PluginSetting]:
         return []
 
+    def is_enabled(self) -> bool:
+        return bool(self._organizer and self._organizer.isPluginEnabled(self.name()))
+
+    def _on_refresh(self):
+        if not self.is_enabled() or not self._delegate:
+            return
+        self._delegate.clear_cache()
+
     def _setup_ui(self, main_window: QtWidgets.QMainWindow):
         tree = main_window.findChild(QtWidgets.QTreeView, "modList")
         if not tree:
@@ -287,22 +307,21 @@ class ModThumbnailPlugin(mobase.IPlugin):
             tree.itemDelegateForColumn(0) or tree.itemDelegate(),
             self._organizer,
             tree,
+            self.is_enabled,
         )
         tree.setItemDelegateForColumn(0, self._delegate)
 
         refresh_action = main_window.findChild(QtGui.QAction, "actionRefresh")
         if refresh_action:
-            refresh_action.triggered.connect(self._delegate.clear_cache)
+            refresh_action.triggered.connect(self._on_refresh)
 
         refresh_shortcut = QtGui.QShortcut(
             QtGui.QKeySequence("Ctrl+Shift+R"), main_window
         )
-        refresh_shortcut.activated.connect(self._delegate.clear_cache)
+        refresh_shortcut.activated.connect(self._on_refresh)
 
-        self._organizer.modList().onModInstalled(
-            lambda mod: self._delegate.clear_cache()
-        )
-        self._organizer.modList().onModRemoved(lambda mod: self._delegate.clear_cache())
+        self._organizer.modList().onModInstalled(lambda mod: self._on_refresh())
+        self._organizer.modList().onModRemoved(lambda mod: self._on_refresh())
 
 
 def createPlugin() -> mobase.IPlugin:
