@@ -264,13 +264,13 @@ class ModThumbnailPlugin(mobase.IPlugin):
         return True
 
     def name(self) -> str:
-        return "Mod Thumbnail Preview"
+        return "Mini Thumbnails"
 
     def author(self) -> str:
-        return "Local Dev"
+        return "Sid Days"
 
     def description(self) -> str:
-        return "Displays mod thumbnails with overwrite handling."
+        return "Displays tiny preview thumbnails for mods."
 
     def version(self) -> mobase.VersionInfo:
         return mobase.VersionInfo(1, 1, 1, mobase.ReleaseType.FINAL)
