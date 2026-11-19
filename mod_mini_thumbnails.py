@@ -22,12 +22,14 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         organizer: mobase.IOrganizer,
         tree_view: QtWidgets.QTreeView,
         is_enabled: Callable[[], bool],
+        is_placeholder_enabled: Callable[[], bool] = lambda: False,
     ):
         super().__init__(tree_view)
         self._parent_delegate = parent_delegate
         self._organizer = organizer
         self._tree_view = tree_view
         self._is_enabled = is_enabled
+        self._is_placeholder_enabled = is_placeholder_enabled
 
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._placeholder_pixmap: Optional[QtGui.QPixmap] = None
@@ -147,6 +149,17 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
 
         return mod_name, mod
 
+    def _paint_base(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ):
+        if self._parent_delegate:
+            self._parent_delegate.paint(painter, option, index)
+        else:
+            super().paint(painter, option, index)
+
     def paint(
         self,
         painter: QtGui.QPainter,
@@ -154,32 +167,29 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         index: QtCore.QModelIndex,
     ):
         if not self._is_enabled():
-            if self._parent_delegate:
-                self._parent_delegate.paint(painter, option, index)
-            else:
-                super().paint(painter, option, index)
+            self._paint_base(painter, option, index)
             return
 
         target = self._get_thumbnail_target(index)
         indent = self.THUMB_SIZE + (self.PADDING * 2)
 
         if target is None or option.rect.width() < indent:
-            if self._parent_delegate:
-                self._parent_delegate.paint(painter, option, index)
-            else:
-                super().paint(painter, option, index)
+            self._paint_base(painter, option, index)
             return
 
         mod_name, mod = target
+        pixmap = self._find_first_image(mod_name, mod)
+        if pixmap is None and self._is_placeholder_enabled():
+            pixmap = self._get_placeholder()
+
+        if pixmap is None:
+            self._paint_base(painter, option, index)
+            return
+
         opt = QtWidgets.QStyleOptionViewItem(option)
         opt.rect.setRight(opt.rect.right() - indent)
+        self._paint_base(painter, opt, index)
 
-        if self._parent_delegate:
-            self._parent_delegate.paint(painter, opt, index)
-        else:
-            super().paint(painter, opt, index)
-
-        pixmap = self._find_first_image(mod_name, mod) or self._get_placeholder()
         painter.save()
         x_offset = option.rect.right() - self.THUMB_SIZE - self.PADDING + 1
         y_offset = option.rect.top() + (option.rect.height() - pixmap.height()) // 2
@@ -287,11 +297,27 @@ class ModThumbnailPlugin(mobase.IPlugin):
     def version(self) -> mobase.VersionInfo:
         return mobase.VersionInfo(1, 1, 1, mobase.ReleaseType.FINAL)
 
+    SETTING_ENABLE_PLACEHOLDER = "enable_placeholder_images"
+
     def settings(self) -> list[mobase.PluginSetting]:
-        return []
+        return [
+            mobase.PluginSetting(
+                self.SETTING_ENABLE_PLACEHOLDER,
+                "Enable placeholder images for mods without an image.",
+                False,
+            )
+        ]
 
     def is_enabled(self) -> bool:
         return bool(self._organizer and self._organizer.isPluginEnabled(self.name()))
+
+    def is_placeholder_enabled(self) -> bool:
+        return bool(
+            self._organizer
+            and self._organizer.pluginSetting(
+                self.name(), self.SETTING_ENABLE_PLACEHOLDER
+            )
+        )
 
     def _on_refresh(self):
         if not self.is_enabled() or not self._delegate:
@@ -308,6 +334,7 @@ class ModThumbnailPlugin(mobase.IPlugin):
             self._organizer,
             tree,
             self.is_enabled,
+            self.is_placeholder_enabled,
         )
         tree.setItemDelegateForColumn(0, self._delegate)
 
