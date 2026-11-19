@@ -8,8 +8,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-    THUMB_SIZE = 20
-    PADDING = 4
+    DEFAULT_THUMB_SIZE = 20
+    DEFAULT_PADDING = 1
     MAX_SEARCH_DEPTH = 3
 
     # Set to True to keep Overwrite completely plain (no image, no placeholder)
@@ -23,6 +23,8 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         tree_view: QtWidgets.QTreeView,
         is_enabled: Callable[[], bool],
         is_placeholder_enabled: Callable[[], bool] = lambda: False,
+        get_thumb_size: Callable[[], int] = lambda: DynamicThumbnailDelegate.DEFAULT_THUMB_SIZE,
+        get_padding: Callable[[], int] = lambda: DynamicThumbnailDelegate.DEFAULT_PADDING,
     ):
         super().__init__(tree_view)
         self._parent_delegate = parent_delegate
@@ -30,9 +32,20 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         self._tree_view = tree_view
         self._is_enabled = is_enabled
         self._is_placeholder_enabled = is_placeholder_enabled
+        self._get_thumb_size = get_thumb_size
+        self._get_padding = get_padding
 
+        self._cached_thumb_size: Optional[int] = None
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._placeholder_pixmap: Optional[QtGui.QPixmap] = None
+
+    def _sync_thumb_size(self) -> int:
+        thumb_size = self._get_thumb_size()
+        if thumb_size != self._cached_thumb_size:
+            self._pixmap_cache.clear()
+            self._placeholder_pixmap = None
+            self._cached_thumb_size = thumb_size
+        return thumb_size
 
     def clear_cache(self):
         self._pixmap_cache.clear()
@@ -40,25 +53,26 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
             self._tree_view.viewport().update()
 
     def _get_placeholder(self) -> QtGui.QPixmap:
+        thumb_size = self._sync_thumb_size()
         if self._placeholder_pixmap is not None:
             return self._placeholder_pixmap
 
-        pm = QtGui.QPixmap(self.THUMB_SIZE, self.THUMB_SIZE)
+        pm = QtGui.QPixmap(thumb_size, thumb_size)
         pm.fill(QtCore.Qt.GlobalColor.transparent)
 
         painter = QtGui.QPainter(pm)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         painter.setPen(QtGui.QPen(QtGui.QColor(90, 90, 90, 160), 1))
         painter.setBrush(QtGui.QBrush(QtGui.QColor(40, 40, 40, 120)))
-        painter.drawRoundedRect(1, 1, self.THUMB_SIZE - 2, self.THUMB_SIZE - 2, 3, 3)
+        painter.drawRoundedRect(1, 1, thumb_size - 2, thumb_size - 2, 3, 3)
 
         painter.setPen(QtGui.QPen(QtGui.QColor(110, 110, 110, 180), 1))
         path = QtGui.QPainterPath()
-        path.moveTo(4, 14)
-        path.lineTo(8, 9)
-        path.lineTo(12, 13)
-        path.lineTo(15, 10)
-        path.lineTo(16, 14)
+        path.moveTo(thumb_size * 0.2, thumb_size * 0.7)
+        path.lineTo(thumb_size * 0.4, thumb_size * 0.45)
+        path.lineTo(thumb_size * 0.6, thumb_size * 0.65)
+        path.lineTo(thumb_size * 0.75, thumb_size * 0.5)
+        path.lineTo(thumb_size * 0.8, thumb_size * 0.7)
         painter.drawPath(path)
         painter.end()
 
@@ -77,6 +91,7 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
     def _find_first_image(
         self, mod_name: str, mod: Optional[mobase.IModInterface]
     ) -> Optional[QtGui.QPixmap]:
+        thumb_size = self._sync_thumb_size()
         if mod_name in self._pixmap_cache:
             return self._pixmap_cache[mod_name]
 
@@ -120,8 +135,8 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
             raw_pixmap = QtGui.QPixmap(str(found_path))
             if not raw_pixmap.isNull():
                 scaled = raw_pixmap.scaled(
-                    self.THUMB_SIZE,
-                    self.THUMB_SIZE,
+                    thumb_size,
+                    thumb_size,
                     QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                     QtCore.Qt.TransformationMode.SmoothTransformation,
                 )
@@ -171,7 +186,9 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
             return
 
         target = self._get_thumbnail_target(index)
-        indent = self.THUMB_SIZE + (self.PADDING * 2)
+        thumb_size = self._sync_thumb_size()
+        padding = self._get_padding()
+        indent = thumb_size + (padding * 2)
 
         if target is None or option.rect.width() < indent:
             self._paint_base(painter, option, index)
@@ -191,7 +208,7 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         self._paint_base(painter, opt, index)
 
         painter.save()
-        x_offset = option.rect.right() - self.THUMB_SIZE - self.PADDING + 1
+        x_offset = option.rect.right() - thumb_size - padding + 1
         y_offset = option.rect.top() + (option.rect.height() - pixmap.height()) // 2
         painter.drawPixmap(x_offset, y_offset, pixmap)
         painter.restore()
@@ -267,9 +284,11 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         if not self._is_enabled():
             return base_size
 
-        min_height = self.THUMB_SIZE + (self.PADDING * 2)
+        thumb_size = self._get_thumb_size()
+        padding = self._get_padding()
+        min_height = thumb_size + (padding * 2)
         return QtCore.QSize(
-            base_size.width() + self.THUMB_SIZE + (self.PADDING * 2),
+            base_size.width() + thumb_size + (padding * 2),
             max(base_size.height(), min_height),
         )
 
@@ -298,6 +317,8 @@ class ModThumbnailPlugin(mobase.IPlugin):
         return mobase.VersionInfo(1, 1, 1, mobase.ReleaseType.FINAL)
 
     SETTING_ENABLE_PLACEHOLDER = "enable_placeholder_images"
+    SETTING_THUMB_SIZE = "thumbnail_size"
+    SETTING_PADDING = "thumbnail_padding"
 
     def settings(self) -> list[mobase.PluginSetting]:
         return [
@@ -305,7 +326,17 @@ class ModThumbnailPlugin(mobase.IPlugin):
                 self.SETTING_ENABLE_PLACEHOLDER,
                 "Enable placeholder images for mods without an image.",
                 False,
-            )
+            ),
+            mobase.PluginSetting(
+                self.SETTING_THUMB_SIZE,
+                "Thumbnail size in pixels.",
+                DynamicThumbnailDelegate.DEFAULT_THUMB_SIZE,
+            ),
+            mobase.PluginSetting(
+                self.SETTING_PADDING,
+                "Padding around each thumbnail in pixels.",
+                DynamicThumbnailDelegate.DEFAULT_PADDING,
+            ),
         ]
 
     def is_enabled(self) -> bool:
@@ -318,6 +349,18 @@ class ModThumbnailPlugin(mobase.IPlugin):
                 self.name(), self.SETTING_ENABLE_PLACEHOLDER
             )
         )
+
+    def thumb_size(self) -> int:
+        if not self._organizer:
+            return DynamicThumbnailDelegate.DEFAULT_THUMB_SIZE
+        val = self._organizer.pluginSetting(self.name(), self.SETTING_THUMB_SIZE)
+        return max(1, int(val))
+
+    def padding(self) -> int:
+        if not self._organizer:
+            return DynamicThumbnailDelegate.DEFAULT_PADDING
+        val = self._organizer.pluginSetting(self.name(), self.SETTING_PADDING)
+        return max(0, int(val))
 
     def _on_refresh(self):
         if not self.is_enabled() or not self._delegate:
@@ -335,6 +378,8 @@ class ModThumbnailPlugin(mobase.IPlugin):
             tree,
             self.is_enabled,
             self.is_placeholder_enabled,
+            self.thumb_size,
+            self.padding,
         )
         tree.setItemDelegateForColumn(0, self._delegate)
 
