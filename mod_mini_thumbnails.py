@@ -10,6 +10,7 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
     DEFAULT_THUMB_SIZE = 20
     DEFAULT_PADDING = 1
+    DEFAULT_HOVER_PREVIEW_SIZE = 256
     MAX_SEARCH_DEPTH = 3
 
     # Set to True to keep Overwrite completely plain (no image, no placeholder)
@@ -25,6 +26,8 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         is_placeholder_enabled: Callable[[], bool] = lambda: False,
         get_thumb_size: Callable[[], int] = lambda: DynamicThumbnailDelegate.DEFAULT_THUMB_SIZE,
         get_padding: Callable[[], int] = lambda: DynamicThumbnailDelegate.DEFAULT_PADDING,
+        is_hover_preview_enabled: Callable[[], bool] = lambda: True,
+        get_hover_preview_size: Callable[[], int] = lambda: DynamicThumbnailDelegate.DEFAULT_HOVER_PREVIEW_SIZE,
     ):
         super().__init__(tree_view)
         self._parent_delegate = parent_delegate
@@ -34,10 +37,19 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         self._is_placeholder_enabled = is_placeholder_enabled
         self._get_thumb_size = get_thumb_size
         self._get_padding = get_padding
+        self._is_hover_preview_enabled = is_hover_preview_enabled
+        self._get_hover_preview_size = get_hover_preview_size
 
         self._cached_thumb_size: Optional[int] = None
+        self._image_path_cache: Dict[str, Optional[Path]] = {}
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._placeholder_pixmap: Optional[QtGui.QPixmap] = None
+        self._preview_popup: Optional[QtWidgets.QLabel] = None
+        self._hovered_preview_key: Optional[tuple[str, int]] = None
+
+        if self._tree_view and self._tree_view.viewport():
+            self._tree_view.viewport().setMouseTracking(True)
+            self._tree_view.viewport().installEventFilter(self)
 
     def _sync_thumb_size(self) -> int:
         thumb_size = self._get_thumb_size()
@@ -48,7 +60,9 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         return thumb_size
 
     def clear_cache(self):
+        self._image_path_cache.clear()
         self._pixmap_cache.clear()
+        self._hide_hover_preview()
         if self._tree_view and self._tree_view.viewport():
             self._tree_view.viewport().update()
 
@@ -88,16 +102,15 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
             return Path(mod.absolutePath())
         return None
 
-    def _find_first_image(
+    def _find_image_path(
         self, mod_name: str, mod: Optional[mobase.IModInterface]
-    ) -> Optional[QtGui.QPixmap]:
-        thumb_size = self._sync_thumb_size()
-        if mod_name in self._pixmap_cache:
-            return self._pixmap_cache[mod_name]
+    ) -> Optional[Path]:
+        if mod_name in self._image_path_cache:
+            return self._image_path_cache[mod_name]
 
         mod_dir = self._resolve_directory(mod_name, mod)
         if not mod_dir or not mod_dir.is_dir():
-            self._pixmap_cache[mod_name] = None
+            self._image_path_cache[mod_name] = None
             return None
 
         found_path: Optional[Path] = None
@@ -131,6 +144,17 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
             except OSError:
                 pass
 
+        self._image_path_cache[mod_name] = found_path
+        return found_path
+
+    def _find_first_image(
+        self, mod_name: str, mod: Optional[mobase.IModInterface]
+    ) -> Optional[QtGui.QPixmap]:
+        thumb_size = self._sync_thumb_size()
+        if mod_name in self._pixmap_cache:
+            return self._pixmap_cache[mod_name]
+
+        found_path = self._find_image_path(mod_name, mod)
         if found_path:
             raw_pixmap = QtGui.QPixmap(str(found_path))
             if not raw_pixmap.isNull():
@@ -262,6 +286,113 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         else:
             super().updateEditorGeometry(editor, option, index)
 
+    def _thumbnail_rect(self, row_rect: QtCore.QRect) -> QtCore.QRect:
+        thumb_size = self._sync_thumb_size()
+        padding = self._get_padding()
+        x = row_rect.right() - thumb_size - padding + 1
+        y = row_rect.top() + (row_rect.height() - thumb_size) // 2
+        return QtCore.QRect(x, y, thumb_size, thumb_size)
+
+    def _ensure_preview_popup(self) -> QtWidgets.QLabel:
+        if self._preview_popup is None:
+            popup = QtWidgets.QLabel(
+                None,
+                QtCore.Qt.WindowType.ToolTip | QtCore.Qt.WindowType.FramelessWindowHint,
+            )
+            popup.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            popup.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            popup.setStyleSheet(
+                "background-color: #1e1e1e; border: 1px solid #555; padding: 2px;"
+            )
+            self._preview_popup = popup
+        return self._preview_popup
+
+    def _hide_hover_preview(self):
+        self._hovered_preview_key = None
+        if self._preview_popup and self._preview_popup.isVisible():
+            self._preview_popup.hide()
+
+    def _position_preview_popup(self, popup: QtWidgets.QLabel, global_pos: QtCore.QPoint):
+        pos = global_pos + QtCore.QPoint(16, 16)
+        screen = QtGui.QGuiApplication.screenAt(global_pos) or QtGui.QGuiApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            size = popup.sizeHint()
+            if pos.x() + size.width() > avail.right():
+                pos.setX(max(avail.left(), global_pos.x() - size.width() - 12))
+            if pos.y() + size.height() > avail.bottom():
+                pos.setY(max(avail.top(), global_pos.y() - size.height() - 12))
+        popup.move(pos)
+
+    def _show_hover_preview(
+        self, mod_name: str, image_path: Path, global_pos: QtCore.QPoint
+    ):
+        preview_size = self._get_hover_preview_size()
+        key = (mod_name, preview_size)
+        popup = self._ensure_preview_popup()
+
+        if self._hovered_preview_key != key:
+            raw = QtGui.QPixmap(str(image_path))
+            if raw.isNull():
+                self._hide_hover_preview()
+                return
+            scaled = raw.scaled(
+                preview_size,
+                preview_size,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+            popup.setPixmap(scaled)
+            popup.adjustSize()
+            self._hovered_preview_key = key
+
+        self._position_preview_popup(popup, global_pos)
+        if not popup.isVisible():
+            popup.show()
+
+    def _get_hovered_image(
+        self, viewport_pos: QtCore.QPoint
+    ) -> Optional[tuple[str, Path]]:
+        if not self._is_enabled() or not self._is_hover_preview_enabled():
+            return None
+        index = self._tree_view.indexAt(viewport_pos)
+        if not index.isValid() or index.column() != 0:
+            return None
+        row_rect = self._tree_view.visualRect(index)
+        if not self._thumbnail_rect(row_rect).contains(viewport_pos):
+            return None
+        target = self._get_thumbnail_target(index)
+        if not target:
+            return None
+        mod_name, mod = target
+        image_path = self._find_image_path(mod_name, mod)
+        if not image_path:
+            return None
+        return mod_name, image_path
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if self._tree_view and obj is self._tree_view.viewport():
+            etype = event.type()
+            if etype == QtCore.QEvent.Type.MouseMove:
+                mouse_event = event
+                if isinstance(mouse_event, QtGui.QMouseEvent):
+                    pos = mouse_event.position().toPoint()
+                    hovered = self._get_hovered_image(pos)
+                    if hovered:
+                        mod_name, image_path = hovered
+                        self._show_hover_preview(
+                            mod_name, image_path, mouse_event.globalPosition().toPoint()
+                        )
+                    else:
+                        self._hide_hover_preview()
+            elif etype in (
+                QtCore.QEvent.Type.Leave,
+                QtCore.QEvent.Type.Wheel,
+                QtCore.QEvent.Type.MouseButtonPress,
+            ):
+                self._hide_hover_preview()
+        return super().eventFilter(obj, event)
+
     def helpEvent(
         self,
         event: QtGui.QHelpEvent,
@@ -269,6 +400,11 @@ class DynamicThumbnailDelegate(QtWidgets.QStyledItemDelegate):
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ) -> bool:
+        if (
+            event.type() == QtCore.QEvent.Type.ToolTip
+            and self._get_hovered_image(event.pos()) is not None
+        ):
+            return True
         if self._parent_delegate:
             return self._parent_delegate.helpEvent(event, view, option, index)
         return super().helpEvent(event, view, option, index)
@@ -319,6 +455,8 @@ class ModThumbnailPlugin(mobase.IPlugin):
     SETTING_ENABLE_PLACEHOLDER = "enable_placeholder_images"
     SETTING_THUMB_SIZE = "thumbnail_size"
     SETTING_PADDING = "thumbnail_padding"
+    SETTING_ENABLE_HOVER_PREVIEW = "enable_hover_preview"
+    SETTING_HOVER_PREVIEW_SIZE = "hover_preview_size"
 
     def settings(self) -> list[mobase.PluginSetting]:
         return [
@@ -336,6 +474,16 @@ class ModThumbnailPlugin(mobase.IPlugin):
                 self.SETTING_PADDING,
                 "Padding around each thumbnail in pixels.",
                 DynamicThumbnailDelegate.DEFAULT_PADDING,
+            ),
+            mobase.PluginSetting(
+                self.SETTING_ENABLE_HOVER_PREVIEW,
+                "Show a larger preview popup when hovering over a thumbnail.",
+                True,
+            ),
+            mobase.PluginSetting(
+                self.SETTING_HOVER_PREVIEW_SIZE,
+                "Maximum width/height in pixels of the hover preview popup.",
+                DynamicThumbnailDelegate.DEFAULT_HOVER_PREVIEW_SIZE,
             ),
         ]
 
@@ -362,6 +510,22 @@ class ModThumbnailPlugin(mobase.IPlugin):
         val = self._organizer.pluginSetting(self.name(), self.SETTING_PADDING)
         return max(0, int(val))
 
+    def is_hover_preview_enabled(self) -> bool:
+        return bool(
+            self._organizer
+            and self._organizer.pluginSetting(
+                self.name(), self.SETTING_ENABLE_HOVER_PREVIEW
+            )
+        )
+
+    def hover_preview_size(self) -> int:
+        if not self._organizer:
+            return DynamicThumbnailDelegate.DEFAULT_HOVER_PREVIEW_SIZE
+        val = self._organizer.pluginSetting(
+            self.name(), self.SETTING_HOVER_PREVIEW_SIZE
+        )
+        return max(32, int(val))
+
     def _on_refresh(self):
         if not self.is_enabled() or not self._delegate:
             return
@@ -380,6 +544,8 @@ class ModThumbnailPlugin(mobase.IPlugin):
             self.is_placeholder_enabled,
             self.thumb_size,
             self.padding,
+            self.is_hover_preview_enabled,
+            self.hover_preview_size,
         )
         tree.setItemDelegateForColumn(0, self._delegate)
 
